@@ -6,11 +6,11 @@ package main
 
 import (
 	"fmt"
+	"github.com/coreos/gangplank/ocp"
 	"github.com/coreos/gangplank/remote"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"os"
-	"os/exec"
 	"path/filepath"
 )
 
@@ -22,7 +22,7 @@ var (
 
 	cmdRemote = &cobra.Command{
 		Use:   "remote",
-		Short: "Run cosa commands remotely",
+		Short: "Run cosa gangplank commands remotely",
 		Run:   runRemote,
 	}
 )
@@ -45,11 +45,13 @@ func init() {
 }
 
 func runRemote(c *cobra.Command, args []string) {
+	// check that the cosa dir exists
 	_, err := os.Stat(localCosaDir)
 	if os.IsNotExist(err) {
 		log.Fatalf("cosaDir: %s does not exist", localCosaDir)
 	}
 
+	// check the cosa dir includes the expected directories
 	dirs := [...]string{"src", "overrides", "builds", "tmp", "cache"}
 	for _, d := range dirs {
 		dir := fmt.Sprintf("%s/%s", localCosaDir, d)
@@ -59,6 +61,7 @@ func runRemote(c *cobra.Command, args []string) {
 		}
 	}
 
+	// includes contains the directories and files used to create the archive
 	var includes []string
 
 	srcDir := fmt.Sprintf("%s/%s", localCosaDir, "src")
@@ -88,8 +91,10 @@ func runRemote(c *cobra.Command, args []string) {
 		includes = append(includes, buildSteps)
 	}
 
+	// dest is the target archive file
 	dest := fmt.Sprintf("%s/devel.tar", localCosaDir)
 
+	// emptyDirs includes the directory names to create empty directories in the archive
 	var emptyDirs []string
 	emptyDirs = append(emptyDirs, "tmp")
 	emptyDirs = append(emptyDirs, "cache")
@@ -105,13 +110,29 @@ func runRemote(c *cobra.Command, args []string) {
 		log.Fatalf("failed to create the tar ball: %v", err)
 	}
 
-	cmdArg := fmt.Sprintf("--from-archive=%s", dest)
-	ocCmdArgs := []string{"start-build", "bc/cosa-runner-master", cmdArg, "--follow=true"}
-	cmd := exec.Command("oc", ocCmdArgs...)
-	_, err = cmd.CombinedOutput()
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	// create a cluster that uses podman
+	cluster := ocp.NewCluster(false, "")
+	cluster.SetPodman(cosaSrvDir)
+
+	// pass the archive file to the cluster
+	f, err := os.Open(dest)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("failed to open the archive %v: %v", dest, err)
+	}
+	cluster.SetStdIO(f, os.Stdout, os.Stderr)
+
+	clusterCtx := ocp.NewClusterContext(ctx, cluster)
+	if jobSpec != "" {
+		specFile = jobSpec
+	}
+	// define the pod
+	pb, err := ocp.NewPodBuilder(clusterCtx, cosaOverrideImage, serviceAccount, specFile, cosaWorkDir)
+	if err != nil {
+		log.Fatalf("failed to define builder pod: %v", err)
+	}
+
+	// start the buildconfig
+	if err := pb.Exec(clusterCtx); err != nil {
+		log.Fatalf("failed to execute CI builder: %v", err)
 	}
 }
